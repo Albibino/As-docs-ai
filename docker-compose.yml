@@ -1,0 +1,31 @@
+# Uso local isolado do serviço de IA (ai + Redis 8).
+# A stack completa (app + ai + postgres + redis) está no docker-compose.yml do
+# tcc-docs-app, que referencia este repositório como contexto de build.
+services:
+  ai:
+    build: .
+    image: tcc-docs-ai:local
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      PORT: 8000
+      AI_EMBEDDING_PROVIDER: ${AI_EMBEDDING_PROVIDER:-hashing}
+      AI_CHAT_PROVIDER: ${AI_CHAT_PROVIDER:-extractive}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-6-luna}
+      DOCS_AI_HMAC_SECRET: ${DOCS_AI_HMAC_SECRET:-tcc-local-hmac-secret-change-me-0000000000}
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+
+  redis:
+    # Redis 8 é obrigatório: os Vector Sets (VADD/VSIM) são o banco vetorial.
+    image: redis:8
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ai_redis_data:/data
+
+volumes:
+  ai_redis_data:

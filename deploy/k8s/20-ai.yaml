@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: as-docs-ai
+  namespace: as-docs
+spec:
+  replicas: 2          # stateless: estado fica no Redis
+  selector:
+    matchLabels: { app: as-docs-ai }
+  template:
+    metadata:
+      labels: { app: as-docs-ai }
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone   # uma réplica por AZ
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: as-docs-ai }
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: ai
+          image: ghcr.io/albibino/as-docs-ai:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef: { name: as-docs-ai-config }
+            - secretRef: { name: as-docs-ai-secret }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 200m, memory: 384Mi }
+            limits: { memory: 1Gi }
+          readinessProbe:
+            httpGet: { path: /health/live, port: 8000 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health/live, port: 8000 }
+            periodSeconds: 20
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: tmp, emptyDir: {} }
+---
+# Só ClusterIP: a IA não tem nenhuma exposição fora do cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: as-docs-ai
+  namespace: as-docs
+spec:
+  type: ClusterIP
+  selector: { app: as-docs-ai }
+  ports:
+    - port: 8000
+      targetPort: 8000
+---
+# Só o backend chama a IA (além do HMAC exigido em cada requisição).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ai-ingress
+  namespace: as-docs
+spec:
+  podSelector:
+    matchLabels: { app: as-docs-ai }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: as-docs-backend } }
+      ports:
+        - port: 8000
