@@ -10,10 +10,16 @@ from redis.exceptions import RedisError
 from tcc_docs_ai.auth import authenticate_request
 from tcc_docs_ai.chat import ChatService, ChatTuning
 from tcc_docs_ai.config import Settings, get_settings
-from tcc_docs_ai.errors import ServiceError, UpstreamUnavailableError
+from tcc_docs_ai.errors import (
+    BearerTokenError,
+    MissingIdempotencyKeyError,
+    ServiceError,
+    UpstreamUnavailableError,
+)
 from tcc_docs_ai.idempotency import RedisIdempotencyStore
 from tcc_docs_ai.indexing import IndexingService
 from tcc_docs_ai.mcp import McpBudget, StreamableHttpMcpClient
+from tcc_docs_ai.oauth import OAuthPrincipal, OAuthResourceServer
 from tcc_docs_ai.provider import (
     EmbeddingProvider,
     ExtractiveAnswerProvider,
@@ -40,6 +46,18 @@ from tcc_docs_ai.tokens import TokenCounter
 from tcc_docs_ai.vectorstore import RedisVectorIndex
 
 SSE_HEADERS = {"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"}
+
+
+def consumer_for_tenant(consumer: str | OAuthPrincipal, tenant_id: str) -> str:
+    return consumer.for_tenant(tenant_id) if isinstance(consumer, OAuthPrincipal) else consumer
+
+
+def idempotency_key(request: Request, consumer: str | OAuthPrincipal) -> str:
+    if isinstance(consumer, OAuthPrincipal):
+        values = request.headers.getlist("idempotency-key")
+        if len(values) != 1 or not values[0].strip():
+            raise MissingIdempotencyKeyError()
+    return request.headers["idempotency-key"]
 
 
 def build_embedder(settings: Settings) -> EmbeddingProvider | None:
@@ -104,6 +122,8 @@ def create_app(
     chat_service: ChatService | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
+    oauth_config = settings.oauth_config()
+    oauth = OAuthResourceServer(oauth_config) if oauth_config is not None else None
     redis_client: Redis | None = None
     if settings.redis_url and (service is None or indexing_service is None or chat_service is None):
         redis_client = Redis.from_url(settings.redis_url.get_secret_value(), decode_responses=False)
@@ -191,7 +211,8 @@ def create_app(
 
     @app.exception_handler(ServiceError)
     async def service_error_handler(_request: Request, exc: ServiceError) -> JSONResponse:
-        return JSONResponse(status_code=exc.status_code, content=exc.payload())
+        headers = {"WWW-Authenticate": exc.challenge} if isinstance(exc, BearerTokenError) else None
+        return JSONResponse(status_code=exc.status_code, content=exc.payload(), headers=headers)
 
     @app.get("/health/live")
     async def live() -> dict[str, str]:
@@ -199,11 +220,9 @@ def create_app(
 
     @app.get("/health/ready")
     async def ready() -> JSONResponse:
-        # Fail-closed: pronto só com consumidor HMAC, conversa e índice ativos e
-        # Redis respondendo. A escrita assistida é opcional (exige chave da OpenAI).
-        configured = bool(
-            settings.consumer_secrets() and app.state.chat_service and app.state.indexing_service
-        )
+        # JWKS é carregado sob demanda. O probe não consulta o provedor de identidade.
+        auth_configured = oauth is not None or any(settings.consumer_secrets().values())
+        configured = bool(auth_configured and app.state.chat_service and app.state.indexing_service)
         if configured and app.state.redis_client is not None:
             try:
                 await app.state.redis_client.ping()
@@ -214,19 +233,25 @@ def create_app(
             content={"status": "ready" if configured else "not_ready"},
         )
 
-    async def signed_consumer(request: Request) -> str:
+    async def request_consumer(request: Request) -> str | OAuthPrincipal:
+        if oauth is not None:
+            return await oauth.authorize(request)
         return await authenticate_request(
             request,
             consumer_secrets=settings.consumer_secrets(),
             max_clock_skew_seconds=settings.ai_hmac_max_clock_skew_seconds,
         )
 
+    requires_consumer = Depends(request_consumer)
+
     @app.post("/v1/generations/stream")
     async def generate(
         payload: GenerationRequest,
         request: Request,
-        consumer: str = Depends(signed_consumer),
+        consumer: str | OAuthPrincipal = requires_consumer,
     ) -> StreamingResponse:
+        identity = consumer_for_tenant(consumer, payload.tenant_id)
+        key = idempotency_key(request, consumer)
         generation_service = app.state.generation_service
         if generation_service is None:
             raise UpstreamUnavailableError(
@@ -235,8 +260,8 @@ def create_app(
         raw_body = await request.body()
         prepared = await generation_service.prepare(
             payload,
-            consumer=consumer,
-            idempotency_key=request.headers["idempotency-key"],
+            consumer=identity,
+            idempotency_key=key,
             raw_body=raw_body,
         )
         return StreamingResponse(
@@ -249,8 +274,10 @@ def create_app(
     async def chat(
         payload: ChatRequest,
         request: Request,
-        consumer: str = Depends(signed_consumer),
+        consumer: str | OAuthPrincipal = requires_consumer,
     ) -> StreamingResponse:
+        identity = consumer_for_tenant(consumer, payload.tenant_id)
+        key = idempotency_key(request, consumer)
         active = app.state.chat_service
         if active is None:
             raise UpstreamUnavailableError(
@@ -258,8 +285,8 @@ def create_app(
             )
         prepared = await active.prepare(
             payload,
-            consumer=consumer,
-            idempotency_key=request.headers["idempotency-key"],
+            consumer=identity,
+            idempotency_key=key,
             raw_body=await request.body(),
         )
         return StreamingResponse(
@@ -269,8 +296,9 @@ def create_app(
     @app.post("/v1/index/pages", response_model=IndexResponse)
     async def index_pages(
         payload: IndexRequest,
-        _consumer: str = Depends(signed_consumer),
+        consumer: str | OAuthPrincipal = requires_consumer,
     ) -> IndexResponse:
+        consumer_for_tenant(consumer, payload.tenant_id)
         active = app.state.indexing_service
         if active is None:
             raise UpstreamUnavailableError("Indexing requires REDIS_URL and an embedding provider")
@@ -280,8 +308,9 @@ def create_app(
     @app.post("/v1/index/status", response_model=IndexStatusResponse)
     async def index_status(
         payload: IndexStatusRequest,
-        _consumer: str = Depends(signed_consumer),
+        consumer: str | OAuthPrincipal = requires_consumer,
     ) -> IndexStatusResponse:
+        consumer_for_tenant(consumer, payload.tenant_id)
         active = app.state.indexing_service
         if active is None:
             raise UpstreamUnavailableError("Indexing requires REDIS_URL and an embedding provider")
@@ -302,7 +331,7 @@ def create_app(
     @app.post("/v1/embeddings", response_model=EmbeddingResponse)
     async def embeddings(
         payload: EmbeddingRequest,
-        _consumer: str = Depends(signed_consumer),
+        _consumer: str | OAuthPrincipal = requires_consumer,
     ) -> EmbeddingResponse:
         active_service = app.state.embedding_service
         if active_service is None:

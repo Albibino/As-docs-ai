@@ -3,7 +3,7 @@
 ## Papel no sistema
 
 ```
- navegador ──► tcc-docs-app (NestJS)  ──HMAC──►  tcc-docs-ai (FastAPI)
+ navegador ──► tcc-docs-app (NestJS) ──HMAC ou OAuth──► tcc-docs-ai (FastAPI)
                  │  ▲                               │      │
                  │  └──── MCP /mcp (Bearer) ◄───────┘      │
                  ▼                                         ▼

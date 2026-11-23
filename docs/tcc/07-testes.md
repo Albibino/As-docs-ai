@@ -51,6 +51,8 @@ pergunta várias vezes contra a API e conta as respostas distintas (ver D11).
 | Isolamento por tenant | `test_indexing.py::test_tenants_are_isolated`, `integration/test_redis_vector_index.py::test_redis_index_is_isolated_by_tenant` |
 | Append-only no Redis real | `integration/test_redis_vector_index.py::test_redis_index_is_append_only_and_versioned` |
 | Contrato HTTP (camelCase) e assinatura obrigatória | `test_rag_api.py::test_index_then_chat_over_http`, `…routes_require_signature` |
+| OAuth: assinatura RS256 com chaves de teste, claims, autorização por rota e tenant, replay, modo HMAC exclusivo e credencial MCP separada | `test_oauth.py` |
+| JWKS: URL fixa, rotação, validade do cache, limite de atualização e falhas de transporte | `test_oauth.py` |
 | Allowlist MCP (só leitura) | `test_mcp.py` |
 
 ## Teste ponta a ponta

@@ -198,3 +198,27 @@ Cobertura: `tests/test_service_model_output.py` reproduz cada saída real vista
 O `tenantId` é o `workspaceId` do app e isola chaves, busca e estados. O TCC tem
 um único workspace, mas o isolamento foi mantido porque já fazia parte da
 arquitetura.
+
+## D14. OAuth Client Credentials local
+
+**Decisão:** a IA recebe os tokens técnicos em modo OAuth opcional. Valida
+`RS256` com o JWKS configurado, sem introspecção. Só o indexador pode gravar e
+consultar o índice; só o assistente pode chamar chat e escrita. Cada rota exige
+seu escopo e o workspace cadastrado para a conta de serviço. HMAC continua como
+padrão para os ambientes existentes; os dois modos não coexistem. A credencial
+delegada do MCP não mudou. Ver [contrato OAuth](06-contratos.md#oauth-20-client-credentials-local).
+
+**Dependência:** o dono autorizou apenas a declaração direta de
+`PyJWT[crypto]>=2.14,<3` para essa validação. O pacote já era transitivo do MCP.
+`mcp.server.auth.provider.TokenVerifier` é uma interface para receber um
+validador; não faz validação por JWKS. O lock reutiliza a entrada existente de
+`PyJWT==2.14.0` e o extra `crypto`; nenhum pacote travado mudou de versão. A
+imagem verificada contém `PyJWT==2.15.1`, pois o `Dockerfile` instala com
+`pip install .`, sem usar o lock. A suíte foi executada com ambas as versões,
+com chaves efêmeras e sem o `.env` do projeto.
+
+**Operação:** o JWKS fica em cache por processo e a atualização é limitada
+mesmo quando chegam chaves desconhecidas. Se não houver uma chave válida para
+verificar o token, a chamada é recusada. A prontidão não depende de uma consulta
+ao provedor. A configuração do realm e o corte do Compose ficam no app; os
+testes do serviço não substituem o teste ponta a ponta com o Keycloak.
