@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from tcc_docs_ai.chat import ChatService
+from tcc_docs_ai.chat import ChatService, ChatTuning
 from tcc_docs_ai.chat_prompt import CHAT_SYSTEM_PROMPT, NOT_FOUND_SENTINEL
 from tcc_docs_ai.provider import ExtractiveAnswerProvider, sampling_parameters
 from tcc_docs_ai.schemas import ChatRequest
@@ -95,22 +95,27 @@ async def test_up_to_date_index_answers_without_mcp_read() -> None:
 
 async def test_only_the_highest_indexed_version_is_evidence() -> None:
     model = RecordingChatModel()
-    _, indexing, chat, _ = build_stack(model=model)
+    app = FakeDocsApp()
+    app.put(AppPage("p-ferias", "Pagina de teste", version=2, markdown=POLICY_V2))
+    _, indexing, chat, _ = build_stack(model=model, app=app)
     # Duas versões indexadas em momentos diferentes: as duas ficam no índice.
     await indexing.index(TENANT, [page_version("p-ferias", 1, "Política de férias", POLICY_V1)])
     await indexing.index(TENANT, [page_version("p-ferias", 2, "Política de férias", POLICY_V2)])
 
-    events = await run(chat, chat_request(mcpCredential=None))
+    events = await run(chat, chat_request(mcpCredential=CREDENTIAL))
 
     meta = first(events, "meta")
     assert meta["ignoredOutdatedChunks"] > 0
-    assert meta["freshnessChecked"] is False
+    assert meta["freshnessChecked"] is True
     assert {item["version"] for item in model.context()} == {2}
 
 
 async def test_not_found_does_not_call_the_model_and_lists_similar_pages() -> None:
     model = RecordingChatModel()
-    _, indexing, chat, _ = build_stack(model=model)
+    app = FakeDocsApp()
+    app.put(AppPage("p-ferias", "Pagina de teste", version=1, markdown=POLICY_V1))
+    app.put(AppPage("p-deploy", "Pagina de teste", version=1, markdown=DEPLOY))
+    _, indexing, chat, _ = build_stack(model=model, app=app)
     await indexing.index(
         TENANT,
         [
@@ -121,7 +126,7 @@ async def test_not_found_does_not_call_the_model_and_lists_similar_pages() -> No
     chat._tuning = chat._tuning.__class__(min_score=0.99, similar_min_score=0.5)  # noqa: SLF001
 
     events = await run(
-        chat, chat_request("Qual é o prazo do pedido de férias?", mcpCredential=None)
+        chat, chat_request("Qual é o prazo do pedido de férias?", mcpCredential=CREDENTIAL)
     )
 
     assert model.inputs == []  # sem evidência o modelo nem é chamado
@@ -133,21 +138,25 @@ async def test_not_found_does_not_call_the_model_and_lists_similar_pages() -> No
 
 async def test_model_sentinel_becomes_not_found_with_similar() -> None:
     model = RecordingChatModel(reply=NOT_FOUND_SENTINEL)
-    _, indexing, chat, _ = build_stack(model=model)
+    app = FakeDocsApp()
+    app.put(AppPage("p-ferias", "Pagina de teste", version=1, markdown=POLICY_V1))
+    _, indexing, chat, _ = build_stack(model=model, app=app)
     await indexing.index(TENANT, [page_version("p-ferias", 1, "Política de férias", POLICY_V1)])
 
-    events = await run(chat, chat_request("Quem aprova o pedido de férias?", mcpCredential=None))
+    events = await run(
+        chat, chat_request("Quem aprova o pedido de férias?", mcpCredential=CREDENTIAL)
+    )
 
     assert model.inputs, "havia evidência, então o modelo foi consultado"
     assert not any(event == "delta" for event, _ in events)
     assert first(events, "not_found")["similar"][0]["pageId"] == "p-ferias"
 
 
-async def test_empty_index_and_no_mcp_is_not_found_without_similar() -> None:
+async def test_empty_index_without_mcp_is_denied() -> None:
     model = RecordingChatModel()
     _, _, chat, _ = build_stack(model=model)
     events = await run(chat, chat_request(mcpCredential=None))
-    assert first(events, "not_found") == {"similar": []}
+    assert first(events, "error")["code"] == "mcp_unavailable"
     assert model.inputs == []
 
 
@@ -193,9 +202,11 @@ async def test_context_page_is_checked_even_when_not_ranked() -> None:
 
 async def test_replays_completed_chat_without_new_model_call() -> None:
     model = RecordingChatModel()
-    _, indexing, chat, _ = build_stack(model=model)
+    app = FakeDocsApp()
+    app.put(AppPage("p-ferias", "Pagina de teste", version=2, markdown=POLICY_V2))
+    _, indexing, chat, _ = build_stack(model=model, app=app)
     await indexing.index(TENANT, [page_version("p-ferias", 2, "Política de férias", POLICY_V2)])
-    request = chat_request(mcpCredential=None)
+    request = chat_request(mcpCredential=CREDENTIAL)
 
     first_run = await run(chat, request, key="same")
     second_run = await run(chat, request, key="same")
@@ -205,9 +216,11 @@ async def test_replays_completed_chat_without_new_model_call() -> None:
 
 
 async def test_extractive_provider_only_copies_context() -> None:
-    _, indexing, chat, _ = build_stack(model=ExtractiveAnswerProvider())  # type: ignore[arg-type]
+    app = FakeDocsApp()
+    app.put(AppPage("p-ferias", "Pagina de teste", version=2, markdown=POLICY_V2))
+    _, indexing, chat, _ = build_stack(model=ExtractiveAnswerProvider(), app=app)  # type: ignore[arg-type]
     await indexing.index(TENANT, [page_version("p-ferias", 2, "Política de férias", POLICY_V2)])
-    events = await run(chat, chat_request(mcpCredential=None))
+    events = await run(chat, chat_request(mcpCredential=CREDENTIAL))
     text = "".join(data["text"] for event, data in events if event == "delta")  # type: ignore[index]
     assert "45 dias" in text
 
@@ -231,3 +244,63 @@ def test_every_model_call_uses_temperature_zero(effort: str | None) -> None:
     params = sampling_parameters(0.0, effort)
     assert params["temperature"] == 0.0
     assert ("reasoning" in params) is (effort is not None)
+
+
+async def test_indexed_page_without_mcp_permission_is_not_evidence() -> None:
+    app = FakeDocsApp()
+    model = RecordingChatModel()
+    _, indexing, chat, _ = build_stack(model=model, app=app)
+    await indexing.index(
+        TENANT,
+        [page_version("p-restrita", 1, "Pagina restrita", POLICY_V1)],
+    )
+
+    events = await run(chat, chat_request())
+
+    assert first(events, "done") == {"found": False}
+    assert first(events, "not_found")["similar"] == []
+    assert model.inputs == []
+    assert not any(name == "sources" for name, _ in events)
+
+
+async def test_unverified_index_hits_over_twenty_are_excluded() -> None:
+    app = FakeDocsApp()
+    pages = []
+
+    for number in range(25):
+        page_id = f"p-{number:02d}"
+        title = "Politica de ferias"
+        app.put(AppPage(page_id, title, version=1, markdown=POLICY_V1))
+        pages.append(page_version(page_id, 1, title, POLICY_V1))
+
+    _, indexing, chat, _ = build_stack(app=app)
+    await indexing.index(TENANT, pages)
+
+    chat._tuning = ChatTuning(
+        top_k=25,
+        min_score=0.0,
+        similar_min_score=0.0,
+    )
+
+    retrieval = await chat.retrieve(chat_request())
+
+    checks = [
+        arguments["pageIds"]
+        for name, arguments in app.calls
+        if name == "docs.get_page_context"
+    ]
+
+    assert len(checks) == 1
+    assert len(checks[0]) == 20
+
+    authorized = set(checks[0])
+    assert retrieval.evidence
+
+    assert all(
+        evidence.page_id in authorized
+        for evidence in retrieval.evidence
+    )
+    assert all(
+        item["pageId"] in authorized
+        for item in retrieval.similar
+    )

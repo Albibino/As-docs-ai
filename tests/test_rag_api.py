@@ -9,7 +9,15 @@ from pydantic import SecretStr
 from tcc_docs_ai.app import create_app
 from tcc_docs_ai.auth import sign_request
 from tcc_docs_ai.config import Settings
-from tests.rag_fixtures import POLICY_V2, RecordingChatModel, build_stack, parse_sse
+from tests.rag_fixtures import (
+    CREDENTIAL,
+    POLICY_V2,
+    AppPage,
+    FakeDocsApp,
+    RecordingChatModel,
+    build_stack,
+    parse_sse,
+)
 
 SECRET = "test-secret-with-at-least-32-bytes"
 
@@ -53,7 +61,9 @@ def client_for(**services: object) -> AsyncClient:
 
 async def test_index_then_chat_over_http() -> None:
     model = RecordingChatModel(reply="São 45 dias [1].")
-    _, indexing, chat, _ = build_stack(model=model)
+    app = FakeDocsApp()
+    app.put(AppPage("p1", "Ferias", version=2, markdown=POLICY_V2))
+    _, indexing, chat, _ = build_stack(model=model, app=app)
     async with client_for(indexing_service=indexing, chat_service=chat) as client:
         indexed = await signed_post(
             client,
@@ -78,7 +88,12 @@ async def test_index_then_chat_over_http() -> None:
         answer = await signed_post(
             client,
             "/v1/chat/stream",
-            {"tenantId": "w1", "sessionId": "s1", "question": "Qual o prazo do pedido de férias?"},
+            {
+                "tenantId": "w1",
+                "sessionId": "s1",
+                "question": "Qual o prazo do pedido de férias?",
+                "mcpCredential": CREDENTIAL,
+            },
             key="k-4",
         )
 

@@ -170,6 +170,9 @@ class ChatService:
     # --- recuperação ----------------------------------------------------------
 
     async def retrieve(self, request: ChatRequest) -> Retrieval:
+        if self._mcp is None or request.mcp_credential is None:
+            raise McpUnavailableError("Authorized MCP session required")
+
         tuning = self._tuning
         query = request.question
         previous = [turn.content for turn in request.history if turn.role == "user"]
@@ -194,19 +197,19 @@ class ChatService:
                 continue
             current_hits.append(hit)
 
-        if self._mcp and request.mcp_credential:
-            async with self._mcp.session(request.mcp_credential.get_secret_value()) as session:
-                await self._check_freshness(
-                    session, request, query, query_vector, states, current_hits, retrieval
-                )
-                retrieval.mcp_tool_calls = session.usage.tool_calls
-            retrieval.freshness_checked = True
-        else:
-            self._collect_index_evidence(current_hits, set(), retrieval)
+        async with self._mcp.session(request.mcp_credential.get_secret_value()) as session:
+            authorized_page_ids = await self._check_freshness(
+                session, request, query, query_vector, states, current_hits, retrieval
+            )
+            retrieval.mcp_tool_calls = session.usage.tool_calls
+        retrieval.freshness_checked = True
 
         retrieval.evidence.sort(key=lambda item: (-item.score, item.page_id))
         retrieval.evidence = retrieval.evidence[: tuning.top_k]
-        retrieval.similar = self._similar(current_hits, retrieval)
+        authorized_hits = [
+            hit for hit in current_hits if hit.chunk.page_id in authorized_page_ids
+        ]
+        retrieval.similar = self._similar(authorized_hits, retrieval)
         return retrieval
 
     def _collect_index_evidence(
@@ -235,7 +238,7 @@ class ChatService:
         states: dict[str, PageIndexState],
         current_hits: list[Any],
         retrieval: Retrieval,
-    ) -> None:
+    ) -> set[str]:
         tuning = self._tuning
         candidates: list[str] = []
         if request.context_page_id:
@@ -250,12 +253,17 @@ class ChatService:
         candidates.extend(str(page["pageId"]) for page in app_hits if page.get("pageId"))
         candidates = list(dict.fromkeys(candidates))[:20]
         if not candidates:
-            return
+            return set()
 
         context = await session.call(GET_PAGE_CONTEXT, {"pageIds": candidates})
         if context.is_error:
             raise McpUnavailableError("docs.get_page_context failed")
         current = {str(page["pageId"]): page for page in _parse_json(context.text).get("pages", [])}
+        authorized_page_ids = {
+            page_id
+            for page_id in candidates
+            if page_id in current and not current[page_id].get("deleted")
+        }
         # Estados de páginas que só vieram da busca do app.
         missing = [page_id for page_id in candidates if page_id not in states]
         if missing:
@@ -281,7 +289,11 @@ class ChatService:
                 )
                 stale_ids.add(page_id)
 
-        self._collect_index_evidence(current_hits, stale_ids, retrieval)
+        self._collect_index_evidence(
+            [hit for hit in current_hits if hit.chunk.page_id in authorized_page_ids],
+            stale_ids,
+            retrieval,
+        )
 
         for stale in retrieval.stale[: tuning.max_fresh_reads]:
             read = await session.call(READ_PAGE, {"pageId": stale.page_id})
@@ -291,6 +303,8 @@ class ChatService:
             await self._rank_fresh_content(
                 page, stale, query_vector, request.context_page_id, retrieval
             )
+
+        return authorized_page_ids
 
     async def _rank_fresh_content(
         self,

@@ -1,0 +1,10 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: as-docs-ai-caddy
+  namespace: as-docs
+data:
+  Caddyfile: "{\n    admin off\n    persist_config off\n}\n\n:8443 {\n    tls /etc/asdocs/tls/tls.crt\
+    \ /etc/asdocs/tls/tls.key\n\n    reverse_proxy 127.0.0.1:8000 {\n        flush_interval\
+    \ -1\n    }\n}\r\n"

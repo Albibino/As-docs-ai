@@ -1,25 +1,26 @@
-# Configuração NÃO sensível do As-docs-ai. Para alterar:
-#   kubectl -n as-docs edit configmap as-docs-ai-config
-#   kubectl -n as-docs rollout restart deployment as-docs-ai
-# Namespace e Redis 8 são criados pelo deploy/k8s do As-docs-app.
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: as-docs-ai-config
   namespace: as-docs
 data:
-  ENVIRONMENT: "production"
-  PORT: "8000"
-  OPENAI_MODEL: "gpt-6-luna"
-  OPENAI_TEMPERATURE: "0"
-  OPENAI_REASONING_EFFORT: "none"
-  OPENAI_EMBEDDING_MODEL: "text-embedding-3-small"
-  OPENAI_EMBEDDING_DIMENSIONS: "1536"
-  AI_EMBEDDING_PROVIDER: "hashing"      # hashing = sem chave (teste)
-  AI_CHAT_PROVIDER: "extractive"           # extractive = sem chave (teste)
-  REDIS_URL: "redis://redis.as-docs.svc.cluster.local:6379/0"
-  AI_MCP_CLIENT_ENABLED: "true"
-  AI_MCP_SERVER_URL: "http://as-docs-backend.as-docs.svc.cluster.local:3000/mcp"
-  AI_MCP_CONNECT_MODE: "legacy"
-  AI_RAG_TOP_K: "8"
-  AI_RAG_MIN_SCORE: "0.66"
+  AI_CHAT_PROVIDER: extractive
+  AI_EMBEDDING_PROVIDER: hashing
+  AI_MCP_CLIENT_ENABLED: 'true'
+  AI_MCP_CONNECT_MODE: legacy
+  AI_MCP_SERVER_URL: http://as-docs-backend.as-docs.svc.cluster.local:3000/mcp
+  AI_OAUTH_CLIENTS_JSON: '{"docs-app-indexer":{"subject":"68036fc7-e86a-4fed-b477-7c0745ce21be"},"docs-app-assistant":{"subject":"45a2b0ab-1346-4329-83d2-877a70190704"}}'
+  AI_OAUTH_ENABLED: 'true'
+  AI_OIDC_ISSUER: https://www.asdocs.abrdns.com/id/realms/as-docs
+  AI_OIDC_JWKS_URL: https://www.asdocs.abrdns.com/id/realms/as-docs/protocol/openid-connect/certs
+  AI_RAG_MIN_SCORE: '0.66'
+  AI_RAG_TOP_K: '8'
+  ENVIRONMENT: production
+  OPENAI_EMBEDDING_DIMENSIONS: '1536'
+  OPENAI_EMBEDDING_MODEL: text-embedding-3-small
+  OPENAI_MODEL: gpt-6-luna
+  OPENAI_REASONING_EFFORT: none
+  OPENAI_TEMPERATURE: '0'
+  PORT: '8000'
+  REDIS_URL: redis://redis.as-docs.svc.cluster.local:6379/0

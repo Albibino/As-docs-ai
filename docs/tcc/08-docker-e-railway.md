@@ -4,7 +4,7 @@
 
 `Dockerfile`:
 - base `python:3.12-slim`;
-- instala o pacote com `pip install .`, sem dependências novas;
+- instala o pacote com `pip install .`, sem usar o `uv.lock`;
 - roda como usuário sem privilégio (`65532`);
 - `HEALTHCHECK` em `/health/live`;
 - entrada com `uvicorn tcc_docs_ai.app:create_app --factory`, na porta `$PORT`;
@@ -29,8 +29,8 @@ por padrão, ou seja, roda sem nenhuma chave. Com `OPENAI_API_KEY`,
 
 `railway.toml`:
 - build pelo `Dockerfile`;
-- healthcheck em `/health/ready`, que responde 200 só com consumidor HMAC,
-  conversa, índice e Redis ativos (fail-closed).
+- healthcheck em `/health/ready`: exige autenticação configurada, conversa,
+  índice e Redis ativos. No deploy padrão, a autenticação é HMAC.
 
 Serviços no projeto Railway, no mesmo ambiente:
 

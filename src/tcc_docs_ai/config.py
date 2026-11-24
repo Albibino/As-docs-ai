@@ -1,11 +1,63 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from functools import lru_cache
+from ipaddress import ip_address
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+INDEXER_CLIENT = "docs-app-indexer"
+ASSISTANT_CLIENT = "docs-app-assistant"
+
+
+@dataclass(frozen=True)
+class OAuthClient:
+    subject: str
+
+
+@dataclass(frozen=True)
+class OAuthConfig:
+    issuer: str
+    jwks_url: str
+    clients: dict[str, OAuthClient]
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON field")
+        result[key] = value
+    return result
+
+
+def _oidc_url(name: str, value: str) -> str:
+    try:
+        url = urlsplit(value)
+        host = url.hostname
+        port = url.port  # valida o intervalo e o formato da porta
+        if (
+            not host
+            or port == 0
+            or url.username is not None
+            or any(c in value for c in "?#\\")
+            or any(ord(c) <= 32 or ord(c) == 127 or c.isspace() for c in value)
+        ):
+            raise ValueError
+        if url.scheme == "https":
+            return value
+        # HTTP só para o emissor/backchannel do laboratório local.
+        if url.scheme == "http" and (
+            host in {"localhost", "keycloak"} or ip_address(host).is_loopback
+        ):
+            return value
+    except ValueError:
+        pass
+    raise ValueError(f"{name} must be an HTTPS URL or a local lab HTTP URL")
 
 
 class Settings(BaseSettings):
@@ -29,6 +81,10 @@ class Settings(BaseSettings):
     ai_chat_provider: Literal["openai", "extractive"] = "openai"
     docs_ai_hmac_secret: SecretStr | None = None
     ai_consumers_json: str | None = None
+    ai_oauth_enabled: bool = False
+    ai_oidc_issuer: str = ""
+    ai_oidc_jwks_url: str = ""
+    ai_oauth_clients_json: str = ""
     ai_max_input_tokens: int = Field(default=500_000, ge=1)
     ai_max_output_tokens: int = Field(default=4_000, ge=1)
     ai_max_proposal_operations: int = Field(default=40, ge=1)
@@ -93,6 +149,39 @@ class Settings(BaseSettings):
         if self.docs_ai_hmac_secret:
             consumers.setdefault("docs-app", self.docs_ai_hmac_secret.get_secret_value())
         return consumers
+
+    def oauth_config(self) -> OAuthConfig | None:
+        if not self.ai_oauth_enabled:
+            return None
+        issuer = _oidc_url("AI_OIDC_ISSUER", self.ai_oidc_issuer)
+        jwks_url = _oidc_url("AI_OIDC_JWKS_URL", self.ai_oidc_jwks_url)
+        issuer_url = urlsplit(issuer)
+        keys_url = urlsplit(jwks_url)
+        if issuer_url.scheme == "http" and issuer_url.hostname != "localhost":
+            raise ValueError("AI_OIDC_ISSUER must use HTTPS outside the local lab")
+        if keys_url.scheme == "http" and (
+            issuer_url.scheme != "http"
+            or (keys_url.hostname == "keycloak" and keys_url.port != 8080)
+        ):
+            raise ValueError("AI_OIDC_JWKS_URL must use HTTPS outside the local lab")
+        try:
+            data = json.loads(self.ai_oauth_clients_json, object_pairs_hook=_unique_object)
+            if not isinstance(data, dict) or data.keys() != {INDEXER_CLIENT, ASSISTANT_CLIENT}:
+                raise ValueError
+            clients = {}
+            for client, binding in data.items():
+                if not isinstance(binding, dict) or binding.keys() != {"subject"}:
+                    raise ValueError
+                subject = binding["subject"]
+                if not isinstance(subject, str) or not subject.strip():
+                    raise ValueError
+                clients[client] = OAuthClient(subject)
+        except (ValueError, RecursionError):
+            raise ValueError(
+                "AI_OAUTH_CLIENTS_JSON must map docs-app-indexer and docs-app-assistant "
+                "to a non-empty subject field each"
+            ) from None
+        return OAuthConfig(issuer, jwks_url, clients)
 
 
 @lru_cache
