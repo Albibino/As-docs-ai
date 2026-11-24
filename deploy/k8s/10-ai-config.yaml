@@ -15,8 +15,8 @@ data:
   OPENAI_REASONING_EFFORT: "none"
   OPENAI_EMBEDDING_MODEL: "text-embedding-3-small"
   OPENAI_EMBEDDING_DIMENSIONS: "1536"
-  AI_EMBEDDING_PROVIDER: "openai"      # hashing = sem chave (teste)
-  AI_CHAT_PROVIDER: "openai"           # extractive = sem chave (teste)
+  AI_EMBEDDING_PROVIDER: "hashing"      # hashing = sem chave (teste)
+  AI_CHAT_PROVIDER: "extractive"           # extractive = sem chave (teste)
   REDIS_URL: "redis://redis.as-docs.svc.cluster.local:6379/0"
   AI_MCP_CLIENT_ENABLED: "true"
   AI_MCP_SERVER_URL: "http://as-docs-backend.as-docs.svc.cluster.local:3000/mcp"

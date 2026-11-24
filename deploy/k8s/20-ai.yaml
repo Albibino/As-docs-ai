@@ -22,7 +22,7 @@ spec:
         runAsUser: 65532
       containers:
         - name: ai
-          image: ghcr.io/albibino/as-docs-ai:latest
+          image: 362749056012.dkr.ecr.us-east-1.amazonaws.com/as-docs-ai:latest
           ports:
             - containerPort: 8000
           envFrom:
