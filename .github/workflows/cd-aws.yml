@@ -1,0 +1,159 @@
+name: CD - As-docs-ai (AWS Academy)
+
+on:
+  push:
+    branches: [feature/aws-academy-deploy]
+    paths:
+      - 'Dockerfile'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'src/**'
+      - '.github/workflows/cd-aws.yml'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'build = validar; publish = ECR; deploy = ECR + EKS'
+        required: true
+        type: choice
+        default: build
+        options: [build, publish, deploy]
+      confirmation:
+        description: 'Para deploy, digite DEPLOY'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cd-as-docs-ai-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ai:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      AWS_REGION: us-east-1
+      EKS_CLUSTER: as-docs-eks
+      EKS_NAMESPACE: as-docs
+      ECR_IMAGE: 362749056012.dkr.ecr.us-east-1.amazonaws.com/as-docs-ai
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configurar uv
+        uses: astral-sh/setup-uv@v10.4.0
+        with:
+          enable-cache: true
+
+      - name: Instalar dependencias de teste
+        run: uv sync --locked --extra dev --python 3.12
+
+      - name: Ruff
+        run: uv run --no-sync ruff check .
+
+      - name: Pytest
+        run: uv run --no-sync python -m pytest -q
+
+      - name: Restringir publicacao e confirmar deploy
+        if: ${{ vars.AS_DOCS_AWS_CD_ENABLED == 'true' && github.event_name == 'workflow_dispatch' && inputs.mode != 'build' }}
+        env:
+          MODE: ${{ inputs.mode }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/feature/aws-academy-deploy" ]; then
+            echo "::error::Publicacao permitida apenas na branch de deploy."
+            exit 1
+          fi
+
+          if [ "$MODE" = "deploy" ] && [ "$CONFIRMATION" != "DEPLOY" ]; then
+            echo "::error::Para deploy, digite DEPLOY."
+            exit 1
+          fi
+
+      - name: Bloquear publicacao AWS desabilitada
+        if: ${{ vars.AS_DOCS_AWS_CD_ENABLED != 'true' && github.event_name == 'workflow_dispatch' && inputs.mode != 'build' }}
+        run: |
+          echo "::error::Publicacao e deploy AWS pelo GitHub estao desabilitados. Use os scripts locais."
+          exit 1
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configurar credenciais AWS Academy
+        if: ${{ vars.AS_DOCS_AWS_CD_ENABLED == 'true' && github.event_name == 'workflow_dispatch' && inputs.mode != 'build' }}
+        uses: aws-actions/configure-aws-credentials@v6.3.0
+        with:
+          aws-region: us-east-1
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+
+      - name: Verificar conta AWS
+        if: ${{ vars.AS_DOCS_AWS_CD_ENABLED == 'true' && github.event_name == 'workflow_dispatch' && inputs.mode != 'build' }}
+        run: |
+          account="$(aws sts get-caller-identity --query Account --output text)"
+          if [ "$account" != "362749056012" ]; then
+            echo "::error::Conta AWS inesperada: $account"
+            exit 1
+          fi
+
+      - name: Login no ECR
+        if: ${{ vars.AS_DOCS_AWS_CD_ENABLED == 'true' && github.event_name == 'workflow_dispatch' && inputs.mode != 'build' }}
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Construir imagem e publicar quando solicitado
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: ${{ vars.AS_DOCS_AWS_CD_ENABLED == 'true' && github.event_name == 'workflow_dispatch' && inputs.mode != 'build' }}
+          tags: ${{ env.ECR_IMAGE }}:${{ github.sha }}
+          cache-from: type=gha,scope=as-docs-ai
+          cache-to: type=gha,mode=max,scope=as-docs-ai
+
+      - name: Instalar kubectl
+        if: ${{ vars.AS_DOCS_AWS_CD_ENABLED == 'true' && github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy' }}
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.37.0
+
+      - name: Atualizar apenas o container de IA no EKS
+        if: ${{ vars.AS_DOCS_AWS_CD_ENABLED == 'true' && github.event_name == 'workflow_dispatch' && inputs.mode == 'deploy' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws eks update-kubeconfig \
+            --region "$AWS_REGION" \
+            --name "$EKS_CLUSTER"
+
+          old_image="$(kubectl -n "$EKS_NAMESPACE" \
+            get deployment/as-docs-ai \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="ai")].image}')"
+
+          new_image="${ECR_IMAGE}:${GITHUB_SHA}"
+
+          echo "Atualizando apenas o container ai."
+          kubectl -n "$EKS_NAMESPACE" \
+            set image deployment/as-docs-ai ai="$new_image"
+
+          if ! kubectl -n "$EKS_NAMESPACE" \
+            rollout status deployment/as-docs-ai --timeout=600s; then
+
+            echo "::error::Rollout falhou. Tentando restaurar a imagem anterior."
+
+            kubectl -n "$EKS_NAMESPACE" \
+              set image deployment/as-docs-ai ai="$old_image"
+
+            kubectl -n "$EKS_NAMESPACE" \
+              rollout status deployment/as-docs-ai --timeout=600s || true
+
+            exit 1
+          fi
+
+          kubectl -n "$EKS_NAMESPACE" get deployment/as-docs-ai

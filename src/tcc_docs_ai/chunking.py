@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-_HEADING = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
+_HEADING = re.compile(r"^(#{1,6})\s+")
 
 
 @dataclass(frozen=True)
@@ -70,14 +70,15 @@ def chunk_markdown(text: str, *, title: str, max_chars: int) -> list[Chunk]:
 
     for raw_line in text.splitlines():
         heading = _HEADING.match(raw_line)
-        if heading:
+        heading_title = raw_line[heading.end():].strip() if heading else ""
+        if heading_title:
             flush_section()
             level = len(heading.group(1))
             while path and path[-1][0] >= level:
                 path.pop()
-            path.append((level, heading.group(2).strip()))
+            path.append((level, heading_title))
             # O heading também é conteúdo: perguntas citam nomes de seção.
-            paragraphs.append(heading.group(2).strip())
+            paragraphs.append(heading_title)
             continue
         if not raw_line.strip():
             flush_paragraph()
