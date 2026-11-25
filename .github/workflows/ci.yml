@@ -1,0 +1,38 @@
+name: CI - As-docs-ai
+
+on:
+  push:
+    branches:
+      - main
+      - feature/aws-academy-deploy
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Testes e qualidade Python
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar uv
+        uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+
+      - name: Instalar dependencias
+        run: uv sync --locked --extra dev --python 3.12
+
+      - name: Executar Ruff
+        run: uv run --no-sync ruff check .
+
+      - name: Executar pytest
+        run: uv run --no-sync python -m pytest -q
