@@ -1,0 +1,82 @@
+name: CI - As-docs-ai
+
+# Fluxo: feature/* -> Pull Request -> main (protegida) -> tag vX.Y.Z (CD).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Ruff e pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - name: Instalar dependências
+        run: uv sync --locked --extra dev
+      - name: Ruff (lint)
+        run: uv run --no-sync ruff check .
+      # Formatação ainda pendente em arquivos existentes: reporta sem bloquear.
+      - name: Ruff (formatação)
+        continue-on-error: true
+        run: uv run --no-sync ruff format --check .
+      - name: Pytest com cobertura
+        run: uv run --no-sync pytest --ignore=tests/integration --cov=src --cov-report=term --cov-report=xml:coverage.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  image:
+    name: Imagem + Trivy
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build da imagem (sem publicar)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: as-docs-ai:ci
+          cache-from: type=gha,scope=ai
+          cache-to: type=gha,scope=ai,mode=max
+      # Achados vão para a aba Security; o bloqueio de alertas novos alto/crítico
+      # é feito pela regra de code scanning da branch protegida.
+      - name: Trivy (vulnerabilidades da imagem)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: as-docs-ai:ci
+          format: sarif
+          output: trivy-ai.sarif
+          severity: MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '0'
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-ai.sarif
+          category: trivy-image-ai
