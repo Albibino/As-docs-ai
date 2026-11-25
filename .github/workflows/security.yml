@@ -1,0 +1,119 @@
+name: Segurança - As-docs-ai
+
+# SAST, segredos e dependências (SCA). Os achados são publicados na aba
+# Security (SARIF). Política: bloqueiam apenas achados NOVOS de severidade
+# alta/crítica (dependency-review, gitleaks e regra de code scanning da main);
+# severidade média e achados já existentes apenas alertam.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 9 * * 1' # semanal, segunda 06:00 (BRT)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codeql:
+    name: SAST - CodeQL (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: github/codeql-action/init@74c1aea9df7c0f02e9b7bfe4a8935abf2e5e3aa6 # v3.39.5
+        with:
+          languages: python
+          build-mode: none
+          queries: security-extended
+      - uses: github/codeql-action/analyze@74c1aea9df7c0f02e9b7bfe4a8935abf2e5e3aa6 # v3.39.5
+        with:
+          category: codeql-python
+
+  bandit:
+    name: SAST - Bandit (regras S do Ruff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: '3.12'
+      # Regras flake8-bandit (S). assert é permitido nos testes.
+      - name: Ruff --select S (SARIF)
+        run: >
+          uvx --no-build ruff@0.17.6 check --select S --per-file-ignores 'tests/**:S101'
+          --output-format sarif --exit-zero . > bandit.sarif
+      - name: Resumo
+        run: |
+          {
+            echo '## Bandit (Ruff S)'
+            echo '```'
+            uvx --no-build ruff@0.17.6 check --select S --per-file-ignores 'tests/**:S101' --statistics --exit-zero .
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: github/codeql-action/upload-sarif@74c1aea9df7c0f02e9b7bfe4a8935abf2e5e3aa6 # v3.39.5
+        with:
+          sarif_file: bandit.sarif
+          category: bandit
+
+  gitleaks:
+    name: Segredos - Gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      # Em PR/push analisa apenas os commits novos; segredo novo bloqueia.
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-review:
+    name: SCA - Dependency Review (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
+
+  pip-audit:
+    name: SCA - pip-audit (relatório)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: '3.12'
+      # Vulnerabilidades já existentes não bloqueiam (dependências novas são
+      # barradas pelo dependency-review); o resultado fica no resumo do job.
+      - name: pip-audit
+        run: |
+          uv export --frozen --no-hashes --no-emit-project --extra dev > requirements-audit.txt
+          {
+            echo '## pip-audit'
+            echo '```'
+            uvx --no-build pip-audit@2.10.1 -r requirements-audit.txt --disable-pip --no-deps || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

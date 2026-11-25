@@ -1,0 +1,84 @@
+name: CI - As-docs-ai
+
+# Fluxo: feature/* -> Pull Request -> main (protegida) -> tag vX.Y.Z (CD).
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Ruff e pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          python-version: '3.12'
+          enable-cache: true
+      - name: Instalar dependências
+        run: uv sync --locked --extra dev --no-build --no-install-project
+      - name: Ruff (lint)
+        run: uv run --no-sync ruff check .
+      # Formatação ainda pendente em arquivos existentes: reporta sem bloquear.
+      - name: Ruff (formatação)
+        continue-on-error: true
+        run: uv run --no-sync ruff format --check .
+      - name: Pytest com cobertura
+        env:
+          PYTHONPATH: src
+        run: uv run --no-sync pytest --ignore=tests/integration --cov=src --cov-report=term --cov-report=xml:coverage.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: coverage
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  image:
+    name: Imagem + Trivy
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - name: Build da imagem (sem publicar)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: as-docs-ai:ci
+          cache-from: type=gha,scope=ai
+          cache-to: type=gha,scope=ai,mode=max
+      # Achados vão para a aba Security; o bloqueio de alertas novos alto/crítico
+      # é feito pela regra de code scanning da branch protegida.
+      - name: Trivy (vulnerabilidades da imagem)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: as-docs-ai:ci
+          format: sarif
+          output: trivy-ai.sarif
+          severity: MEDIUM,HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '0'
+      - uses: github/codeql-action/upload-sarif@74c1aea9df7c0f02e9b7bfe4a8935abf2e5e3aa6 # v3.39.5
+        if: always()
+        with:
+          sarif_file: trivy-ai.sarif
+          category: trivy-image-ai
