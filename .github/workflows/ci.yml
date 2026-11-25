@@ -21,18 +21,20 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Configurar uv
-        uses: astral-sh/setup-uv@v10.4.0
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           enable-cache: true
 
       - name: Instalar dependencias
-        run: uv sync --locked --extra dev --python 3.12
+        run: uv sync --locked --extra dev --python 3.12 --no-build --no-install-project
 
       - name: Executar Ruff
         run: uv run --no-sync ruff check .
 
       - name: Executar pytest
+        env:
+          PYTHONPATH: src
         run: uv run --no-sync python -m pytest -q
