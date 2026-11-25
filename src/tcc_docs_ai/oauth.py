@@ -3,19 +3,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import ssl
 from dataclasses import dataclass
 from http.client import HTTPException
 from time import monotonic
 from typing import Any
 from urllib.error import HTTPError
-from urllib.request import HTTPRedirectHandler, ProxyHandler, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, build_opener
 from urllib.request import Request as UrlRequest
 
 import jwt
 from fastapi import Request
 
-from tcc_docs_ai.config import ASSISTANT_CLIENT, INDEXER_CLIENT, OAuthConfig
+from tcc_docs_ai.config import OAuthConfig
 from tcc_docs_ai.errors import AuthorizationError, BearerTokenError
+from tcc_docs_ai.oidc_config import ASSISTANT_CLIENT, INDEXER_CLIENT
 
 _AUDIENCE = "docs-ai"
 _ALGORITHM = "RS256"
@@ -51,11 +53,13 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def _download_jwks(url: str, deadline: float) -> bytes | None:
+def _download_jwks(
+    url: str, deadline: float, tls_context: ssl.SSLContext | None = None
+) -> bytes | None:
     remaining = deadline - monotonic()
     if remaining <= 0:
         return None
-    opener = build_opener(ProxyHandler({}), _NoRedirect())
+    opener = build_opener(ProxyHandler({}), _NoRedirect(), HTTPSHandler(context=tls_context))
     request = UrlRequest(url, headers={"Accept": "application/json", "Accept-Encoding": "identity"})
     try:
         with opener.open(request, timeout=remaining) as response:
@@ -82,8 +86,13 @@ def _download_jwks(url: str, deadline: float) -> bytes | None:
 
 
 class JwksCache:
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, ca_file: str | None = None) -> None:
         self._url = url
+        self._tls_context = None
+        if ca_file is not None:
+            # Acrescenta a CA só ao cliente JWKS, sem alterar as raízes padrão.
+            self._tls_context = ssl.create_default_context()
+            self._tls_context.load_verify_locations(cafile=ca_file)
         self._keys: dict[str, jwt.PyJWK] = {}
         self._expires_at = 0.0
         self._refresh_after = 0.0
@@ -120,7 +129,9 @@ class JwksCache:
         if self._download_task is not None and not self._download_task.done():
             raise ValueError("JWKS download still running")
         task = asyncio.create_task(
-            asyncio.to_thread(_download_jwks, self._url, monotonic() + _JWKS_TIMEOUT_SECONDS)
+            asyncio.to_thread(
+                _download_jwks, self._url, monotonic() + _JWKS_TIMEOUT_SECONDS, self._tls_context
+            )
         )
         self._download_task = task
         done, _ = await asyncio.wait({task}, timeout=_JWKS_TIMEOUT_SECONDS)
@@ -164,7 +175,7 @@ class JwksCache:
 class OAuthResourceServer:
     def __init__(self, config: OAuthConfig) -> None:
         self._config = config
-        self._jwks = JwksCache(config.jwks_url)
+        self._jwks = JwksCache(config.jwks_url, config.ca_file)
 
     async def authorize(self, request: Request) -> OAuthPrincipal:
         claims = await self._verified_claims(request)

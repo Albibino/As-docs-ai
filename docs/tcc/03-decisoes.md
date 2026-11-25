@@ -222,3 +222,27 @@ mesmo quando chegam chaves desconhecidas. Se não houver uma chave válida para
 verificar o token, a chamada é recusada. A prontidão não depende de uma consulta
 ao provedor. A configuração do realm e o corte do Compose ficam no app; os
 testes do serviço não substituem o teste ponta a ponta com o Keycloak.
+
+## D15. OAuth privado no AWS Lab
+
+**Decisão:** o backend envia o Bearer por HTTPS ao Service privado da IA. O
+Caddy termina o TLS e encaminha a requisição ao Uvicorn no loopback do pod.
+A IA busca o JWKS no Service HTTPS do Keycloak, com validação de hostname e
+uma CA adicional exclusiva desse cliente. O `iss` continua idêntico ao do
+token. A exceção `AI_OIDC_AWS_LAB_HTTP=true` aceita somente o DNS padrão do
+ALB do AS Docs em `us-east-1`, no caminho `/id/realms/as-docs`, em conjunto
+com o JWKS privado exato. A configuração HTTPS e o Compose local permanecem
+independentes dessa exceção.
+
+**Operação:** as imagens são fixadas por digest. O modo de diagnóstico não
+injeta a chave OpenAI nem compartilha índice ou cache de idempotência com o
+modo OpenAI. Os manifests HMAC continuam disponíveis para ambientes legados.
+O sidecar Caddy executa uma cópia do binário sem os atributos de capability
+da imagem oficial: a porta 8443 não exige privilégio. O pod mantém todas as
+capabilities removidas e o filesystem da imagem somente leitura.
+Veja o [contrato do renderizador e a ordem de configuração](../../deploy/README.md#aws-lab-portátil--oauth-client-credentials).
+
+No deploy integral, o Terraform do app calcula a tag da IA com os arquivos
+listados em `deploy/aws-lab-build-inputs.json`. Esse manifesto é gerado pelo
+mesmo seletor que prepara o contexto Docker e só precisa ser atualizado se
+a lista de entradas mudar. O deploy continua consumindo a imagem por digest.
