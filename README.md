@@ -19,8 +19,9 @@ temperatura é **0**, e as respostas ficam restritas ao conteúdo dos documentos
 | Estado do índice | `POST /v1/index/status` | Maior versão indexada por página. |
 | Embeddings | `POST /v1/embeddings` | API interna. |
 
-Todas as rotas `/v1/*` são assinadas por HMAC (`x-ai-consumer`,
-`x-ai-timestamp`, `idempotency-key`, `x-ai-signature`).
+Por padrão, as rotas `/v1/*` exigem assinatura HMAC. Com
+`AI_OAUTH_ENABLED=true`, passam a exigir um token OAuth de Client Credentials,
+sem fallback para HMAC. Veja a [configuração e as permissões por rota](docs/tcc/06-contratos.md#oauth-20-client-credentials-local).
 
 O banco vetorial é o **Redis 8 (Vector Sets)**, o mesmo Redis que já guardava a
 idempotência. Decisões, contratos e o fluxo completo estão em

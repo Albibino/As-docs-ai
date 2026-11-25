@@ -1,11 +1,28 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from functools import lru_cache
 from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from tcc_docs_ai.oidc_config import AWS_JWKS_URL, parse_oauth_clients, validate_oidc_urls
+
+
+@dataclass(frozen=True)
+class OAuthClient:
+    subject: str
+    tenant_id: str
+
+
+@dataclass(frozen=True)
+class OAuthConfig:
+    issuer: str
+    jwks_url: str
+    clients: dict[str, OAuthClient]
+    ca_file: str | None = None
 
 
 class Settings(BaseSettings):
@@ -29,6 +46,12 @@ class Settings(BaseSettings):
     ai_chat_provider: Literal["openai", "extractive"] = "openai"
     docs_ai_hmac_secret: SecretStr | None = None
     ai_consumers_json: str | None = None
+    ai_oauth_enabled: bool = False
+    ai_oidc_issuer: str = ""
+    ai_oidc_jwks_url: str = ""
+    ai_oidc_aws_lab_http: bool = False
+    ai_oidc_ca_file: str | None = None
+    ai_oauth_clients_json: str = ""
     ai_max_input_tokens: int = Field(default=500_000, ge=1)
     ai_max_output_tokens: int = Field(default=4_000, ge=1)
     ai_max_proposal_operations: int = Field(default=40, ge=1)
@@ -93,6 +116,23 @@ class Settings(BaseSettings):
         if self.docs_ai_hmac_secret:
             consumers.setdefault("docs-app", self.docs_ai_hmac_secret.get_secret_value())
         return consumers
+
+    def oauth_config(self) -> OAuthConfig | None:
+        if not self.ai_oauth_enabled:
+            return None
+        validate_oidc_urls(
+            self.ai_oidc_issuer, self.ai_oidc_jwks_url, aws_lab_http=self.ai_oidc_aws_lab_http
+        )
+        bindings = parse_oauth_clients(
+            self.ai_oauth_clients_json, uuid_only=self.ai_oidc_jwks_url == AWS_JWKS_URL
+        )
+        clients = {
+            client: OAuthClient(binding["subject"], binding["tenantId"])
+            for client, binding in bindings.items()
+        }
+        return OAuthConfig(
+            self.ai_oidc_issuer, self.ai_oidc_jwks_url, clients, self.ai_oidc_ca_file
+        )
 
 
 @lru_cache

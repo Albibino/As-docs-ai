@@ -21,6 +21,31 @@ class AuthenticationError(ServiceError):
     status_code = 401
 
 
+class BearerTokenError(ServiceError):
+    code = "invalid_token"
+    status_code = 401
+
+    def __init__(self, *, missing: bool = False) -> None:
+        super().__init__("Bearer token required" if missing else "Bearer token is invalid")
+        self.challenge = "Bearer" if missing else 'Bearer error="invalid_token"'
+
+
+class AuthorizationError(ServiceError):
+    code = "forbidden"
+    status_code = 403
+
+    def __init__(self) -> None:
+        super().__init__("Bearer token is not authorized for this request")
+
+
+class MissingIdempotencyKeyError(ServiceError):
+    code = "missing_idempotency_key"
+    status_code = 400
+
+    def __init__(self) -> None:
+        super().__init__("A single non-empty idempotency-key header is required")
+
+
 class BudgetExceededError(ServiceError):
     code = "input_budget_exceeded"
     status_code = 422

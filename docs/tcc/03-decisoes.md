@@ -198,3 +198,51 @@ Cobertura: `tests/test_service_model_output.py` reproduz cada saída real vista
 O `tenantId` é o `workspaceId` do app e isola chaves, busca e estados. O TCC tem
 um único workspace, mas o isolamento foi mantido porque já fazia parte da
 arquitetura.
+
+## D14. OAuth Client Credentials local
+
+**Decisão:** a IA recebe os tokens técnicos em modo OAuth opcional. Valida
+`RS256` com o JWKS configurado, sem introspecção. Só o indexador pode gravar e
+consultar o índice; só o assistente pode chamar chat e escrita. Cada rota exige
+seu escopo e o workspace cadastrado para a conta de serviço. HMAC continua como
+padrão para os ambientes existentes; os dois modos não coexistem. A credencial
+delegada do MCP não mudou. Ver [contrato OAuth](06-contratos.md#oauth-20-client-credentials-local).
+
+**Dependência:** o dono autorizou apenas a declaração direta de
+`PyJWT[crypto]>=2.14,<3` para essa validação. O pacote já era transitivo do MCP.
+`mcp.server.auth.provider.TokenVerifier` é uma interface para receber um
+validador; não faz validação por JWKS. O lock reutiliza a entrada existente de
+`PyJWT==2.14.0` e o extra `crypto`; nenhum pacote travado mudou de versão. A
+imagem verificada contém `PyJWT==2.15.1`, pois o `Dockerfile` instala com
+`pip install .`, sem usar o lock. A suíte foi executada com ambas as versões,
+com chaves efêmeras e sem o `.env` do projeto.
+
+**Operação:** o JWKS fica em cache por processo e a atualização é limitada
+mesmo quando chegam chaves desconhecidas. Se não houver uma chave válida para
+verificar o token, a chamada é recusada. A prontidão não depende de uma consulta
+ao provedor. A configuração do realm e o corte do Compose ficam no app; os
+testes do serviço não substituem o teste ponta a ponta com o Keycloak.
+
+## D15. OAuth privado no AWS Lab
+
+**Decisão:** o backend envia o Bearer por HTTPS ao Service privado da IA. O
+Caddy termina o TLS e encaminha a requisição ao Uvicorn no loopback do pod.
+A IA busca o JWKS no Service HTTPS do Keycloak, com validação de hostname e
+uma CA adicional exclusiva desse cliente. O `iss` continua idêntico ao do
+token. A exceção `AI_OIDC_AWS_LAB_HTTP=true` aceita somente o DNS padrão do
+ALB do AS Docs em `us-east-1`, no caminho `/id/realms/as-docs`, em conjunto
+com o JWKS privado exato. A configuração HTTPS e o Compose local permanecem
+independentes dessa exceção.
+
+**Operação:** as imagens são fixadas por digest. O modo de diagnóstico não
+injeta a chave OpenAI nem compartilha índice ou cache de idempotência com o
+modo OpenAI. Os manifests HMAC continuam disponíveis para ambientes legados.
+O sidecar Caddy executa uma cópia do binário sem os atributos de capability
+da imagem oficial: a porta 8443 não exige privilégio. O pod mantém todas as
+capabilities removidas e o filesystem da imagem somente leitura.
+Veja o [contrato do renderizador e a ordem de configuração](../../deploy/README.md#aws-lab-portátil--oauth-client-credentials).
+
+No deploy integral, o Terraform do app calcula a tag da IA com os arquivos
+listados em `deploy/aws-lab-build-inputs.json`. Esse manifesto é gerado pelo
+mesmo seletor que prepara o contexto Docker e só precisa ser atualizado se
+a lista de entradas mudar. O deploy continua consumindo a imagem por digest.
